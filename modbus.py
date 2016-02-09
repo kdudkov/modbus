@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import serial
+import time
 import logging
 
 _CRC16TABLE = (0x0, 0xc0c1, 0xc181, 0x140, 0xc301, 0x3c0, 0x280, 0xc241, 0xc601, 0x6c0, 0x780, 0xc741, 0x500, 0xc5c1, 0xc481, 
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 def to_be(n):
     return n & 0xff, (n & 0xff00) >> 8
+
+def to_le(n):
+    return (n & 0xff00) >> 8, n & 0xff
 
 def string_crc(s):
     crc = 0xFFFF
@@ -77,7 +81,8 @@ class RtuMessage(object):
             msg = s
         self.addr = msg[0]
         self.fn = msg[1]
-        self.payload = msg[2:-2]
+        self.size = msg[2]
+        self.payload = msg[3:-2]
         crc = msg_crc(msg[:-2])
         assert list(crc) == msg[-2:], 'invalid crc'
 
@@ -92,22 +97,60 @@ class Device(object):
         self.serial = serial.Serial(port=dev, baudrate=baudrate, parity=serial.PARITY_NONE, bytesize=8, stopbits=1, timeout=0.05)
         self.serial.baudrate = baudrate
 
-    def _communicate(self, msg, read_size):
+    def _communicate(self, request, read_size):
         latest_write_time = time.time()
         
         self.serial.write(request)
 
-        answer = self.serial.read(read_size)
+        s = self.serial.read(read_size)
+        answer = [ord(x) for x in s]
         if not answer:
             raise Exception('timeout')
-        logger.debug('answer: {}', answer)
+        logger.debug('answer: %s', to_hex(answer))
         msg = RtuMessage(answer)
         return msg
 
     def read_coils(self, start, num):
-        req = make_rtu_message(self.addr, 1, to_be(start) + to_be(num))
-        logger.debug('msg: {}', req)
-        resp = self._communicate(req, 4 + int((num + 7) / 8))
+        req = make_rtu_message(self.addr, 1, to_le(start) + to_le(num))
+        logger.debug('msg: %s', to_hex(req))
+        resp = self._communicate(req, 5 + int((num + 8) / 8))
         return resp.payload
 
-print RtuMessage('\x00\x06\x00\x01\x00\x01\x18\x1b')
+    def read_input(self, addr, num=1):
+        req = make_rtu_message(self.addr, 2, to_le(addr) + to_le(num))
+        logger.debug('msg: %s', to_hex(req))
+        resp = self._communicate(req, 5 + int((num + 8) / 8))
+        return resp.payload
+
+    def read_reg(self, addr, num=1):
+        req = make_rtu_message(self.addr, 3, to_le(addr) + to_le(num))
+        logger.debug('msg: %s', to_hex(req))
+        resp = self._communicate(req, len(req))
+        return resp.payload
+
+    def read_input_analog(self, addr, num=1):
+        req = make_rtu_message(self.addr, 4, to_le(addr) + to_le(num))
+        logger.debug('msg: %s', to_hex(req))
+        resp = self._communicate(req, 5 + num * 2)
+        return resp.payload
+
+    def write_coil(self, addr, val):
+        req = make_rtu_message(self.addr, 5, to_le(addr) + to_le(val))
+        logger.debug('msg: %s', to_hex(req))
+        resp = self._communicate(req, len(req))
+        return resp.payload
+
+    def write_reg(self, addr, val):
+        req = make_rtu_message(self.addr, 6, to_le(addr) + to_le(val))
+        logger.debug('msg: %s', to_hex(req))
+        resp = self._communicate(req, len(req))
+        return resp.payload
+
+logging.basicConfig(level='DEBUG')
+
+d = Device('/dev/ttyUSB0', 2)
+
+d.write_coil(1, 0x0)
+
+print d.read_coils(2, 2)
+print d.read_input(1, 4)
